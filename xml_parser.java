@@ -54,3 +54,12 @@ public class CarDataXMLParsingStrategy implements XMLParsingStrategy {
         }
     }
 }
+
+/*
+    In this optimized version:
+
+We use the streaming API (XMLStreamReader) to process XML events sequentially without loading the entire document into memory.
+We minimize object creation by reusing maps (extractedData) for storing extracted data and incidents.
+We avoid redundant method calls and string concatenation inside the loop.
+Exception handling is optimized to catch specific exceptions (XMLStreamException) for better error handling.
+These optimizations should improve the performance and readability of the XML parsing logic. */
