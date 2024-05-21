@@ -1,0 +1,141 @@
+public interface MessageProcessor {
+    void processMessage(String body);
+}
+
+public interface DataTransformer {
+    String transformData(String body);
+}
+
+import org.springframework.web.reactive.function.client.WebClient;
+import reactor.core.publisher.Mono;
+import io.github.resilience4j.circuitbreaker.CircuitBreaker;
+import io.github.resilience4j.retry.Retry;
+
+public class WebClientMessageProcessor implements MessageProcessor {
+    private final WebClient webClient;
+    private final CircuitBreaker circuitBreaker;
+    private final Retry retry;
+
+    public WebClientMessageProcessor(WebClient webClient, CircuitBreaker circuitBreaker, Retry retry) {
+        this.webClient = webClient;
+        this.circuitBreaker = circuitBreaker;
+        this.retry = retry;
+    }
+
+    @Override
+    public void processMessage(String body) {
+        Mono<Boolean> responseMono = Mono.fromCallable(() ->
+            Retry.decorateCallable(retry, () ->
+                circuitBreaker.executeCallable(() ->
+                    webClient.post()
+                        .uri("/rules-check")
+                        .bodyValue(body)
+                        .retrieve()
+                        .bodyToMono(Boolean.class)
+                        .block()
+                )
+            ).call()
+        );
+
+        Boolean shouldProcess = responseMono.block();
+        if (Boolean.TRUE.equals(shouldProcess)) {
+            System.out.println("Message should be processed: " + body);
+        } else {
+            System.out.println("Message should not be processed: " + body);
+        }
+    }
+}
+
+public class SimpleDataTransformer implements DataTransformer {
+    @Override
+    public String transformData(String body) {
+        return "Transformed: " + body;
+    }
+}
+public class WebClientFactory {
+    public static WebClient createWebClient(String baseUrl) {
+        return WebClient.create(baseUrl);
+    }
+}
+
+import org.apache.camel.CamelContext;
+import org.apache.camel.builder.RouteBuilder;
+import org.apache.camel.impl.DefaultCamelContext;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerConfig;
+import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
+import io.github.resilience4j.retry.RetryConfig;
+import io.github.resilience4j.retry.RetryRegistry;
+import java.time.Duration;
+
+public class SolaceCamelRoute {
+    public static void main(String[] args) throws Exception {
+        // Create CamelContext
+        CamelContext camelContext = new DefaultCamelContext();
+
+        // Configure Solace component
+        camelContext.addComponent("solace", new org.apache.camel.component.solace.SolaceComponent());
+
+        // Configure Circuit Breaker
+        CircuitBreakerConfig circuitBreakerConfig = CircuitBreakerConfig.custom()
+                .failureRateThreshold(50)
+                .waitDurationInOpenState(Duration.ofMillis(1000))
+                .slidingWindowSize(10)
+                .build();
+
+        CircuitBreakerRegistry circuitBreakerRegistry = CircuitBreakerRegistry.of(circuitBreakerConfig);
+        CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("webClientCircuitBreaker");
+
+        // Configure Retry
+        RetryConfig retryConfig = RetryConfig.custom()
+                .maxAttempts(3)
+                .waitDuration(Duration.ofMillis(500))
+                .build();
+
+        RetryRegistry retryRegistry = RetryRegistry.of(retryConfig);
+        Retry retry = retryRegistry.retry("webClientRetry");
+
+        // Create WebClient instance
+        WebClient webClient = WebClientFactory.createWebClient("https://external-service-url");
+
+        // Create processors
+        MessageProcessor messageProcessor = new WebClientMessageProcessor(webClient, circuitBreaker, retry);
+        DataTransformer dataTransformer = new SimpleDataTransformer();
+
+        // Add routes
+        camelContext.addRoutes(new RouteBuilder() {
+            @Override
+            public void configure() {
+                from("solace:queue:inputQueue")
+                    .parallelProcessing() // Enable parallel processing
+                    .process(exchange -> {
+                        String body = exchange.getIn().getBody(String.class);
+                        messageProcessor.processMessage(body);
+                    })
+                    .filter(header("shouldProcess").isEqualTo(true)) // Filter messages based on rules
+                    .process(exchange -> {
+                        String body = exchange.getIn().getBody(String.class);
+                        String transformedBody = dataTransformer.transformData(body);
+                        exchange.getIn().setBody(transformedBody);
+                    })
+                    .to("solace:topic:outputTopic"); // Publish to another Solace topic
+            }
+        });
+
+        // Start the context
+        camelContext.start();
+
+        // Let it run
+        Thread.sleep(10000);
+
+        // Stop the context
+        camelContext.stop();
+    }
+}
+
+Explanation
+Interfaces and Abstraction: We defined MessageProcessor and DataTransformer interfaces to follow the Interface Segregation Principle.
+Concrete Implementations: WebClientMessageProcessor and SimpleDataTransformer classes implement the interfaces. This allows for different processing and transformation strategies (Strategy Pattern).
+Factory Pattern: WebClientFactory is used to create WebClient instances, making the code more modular and testable.
+Circuit Breaker and Retry: These are integrated into the WebClientMessageProcessor class, following the Decorator Pattern to add resilience behavior.
+Camel Route Configuration: The route is configured to use the processors and transformers, with parallel processing enabled to handle data concurrency.
+This refactored solution adheres to OOP principles, SOLID design principles, and appropriate design patterns, making it more maintainable, scalable, and testable.
